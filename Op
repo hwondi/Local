@@ -1,0 +1,211 @@
+local ServerScriptService = game:GetService("ServerScriptService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
+local Players = game:GetService("Players")
+
+local function ensureRemote(name)
+	local existing = ReplicatedStorage:FindFirstChild(name)
+	if existing then return existing end
+	local ev = Instance.new("RemoteEvent")
+	ev.Name = name
+	ev.Parent = ReplicatedStorage
+	return ev
+end
+
+local SavePosEvent = ensureRemote("Premium_SavePos")
+local TeleportRequest = ensureRemote("Premium_Teleport")
+
+local Admins = {
+	[12345678] = true,
+}
+
+local function isAdmin(player)
+	return Admins[player.UserId] == true
+end
+
+local SavedPositions = {}
+
+SavePosEvent.OnServerEvent:Connect(function(player, pos)
+	if not isAdmin(player) then return end
+	if typeof(pos) ~= "Vector3" then return end
+	SavedPositions[player.UserId] = pos
+	SavePosEvent:FireClient(player, true, pos)
+end)
+
+TeleportRequest.OnServerEvent:Connect(function(player)
+	if not isAdmin(player) then return end
+	local pos = SavedPositions[player.UserId]
+	if not pos then
+		TeleportRequest:FireClient(player, false, "no_pos")
+		return
+	end
+	local character = player.Character
+	if not character then
+		player:LoadCharacter()
+		character = player.Character
+		if not character then
+			TeleportRequest:FireClient(player, false, "no_char")
+			return
+		end
+	end
+	local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
+	if not root then
+		TeleportRequest:FireClient(player, false, "no_root")
+		return
+	end
+	local targetCFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+	root.CFrame = targetCFrame
+	TeleportRequest:FireClient(player, true, pos)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	SavedPositions[player.UserId] = nil
+end)
+
+local localSource = [[
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local SavePosEvent = ReplicatedStorage:WaitForChild("Premium_SavePos")
+local TeleportRequest = ReplicatedStorage:WaitForChild("Premium_Teleport")
+
+local function requestSavePosition()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	SavePosEvent:FireServer(root.Position)
+end
+
+local function requestTeleport()
+	TeleportRequest:FireServer()
+end
+
+SavePosEvent.OnClientEvent:Connect(function(success, pos)
+end)
+
+TeleportRequest.OnClientEvent:Connect(function(success, data)
+end)
+
+local function createGui()
+	local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "PremiumGui"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = playerGui
+
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Name = "Main"
+	mainFrame.Size = UDim2.new(0, 220, 0, 100)
+	mainFrame.Position = UDim2.new(0, 12, 0, 12)
+	mainFrame.BackgroundTransparency = 0
+	mainFrame.BorderSizePixel = 0
+	mainFrame.Parent = screenGui
+	mainFrame.Active = true
+	mainFrame.Draggable = true
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, 0, 0, 28)
+	title.Position = UDim2.new(0, 0, 0, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "Premium"
+	title.Font = Enum.Font.SourceSansBold
+	title.TextSize = 18
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextYAlignment = Enum.TextYAlignment.Center
+	title.Parent = mainFrame
+
+	local btnContainer = Instance.new("Frame")
+	btnContainer.Size = UDim2.new(1, -12, 1, -40)
+	btnContainer.Position = UDim2.new(0, 6, 0, 34)
+	btnContainer.BackgroundTransparency = 1
+	btnContainer.Parent = mainFrame
+
+	local saveBtn = Instance.new("TextButton")
+	saveBtn.Name = "SaveBtn"
+	saveBtn.Size = UDim2.new(1, 0, 0, 32)
+	saveBtn.Position = UDim2.new(0, 0, 0, 0)
+	saveBtn.Text = "Salvar Posição (P)"
+	saveBtn.Font = Enum.Font.SourceSans
+	saveBtn.TextSize = 16
+	saveBtn.Parent = btnContainer
+	saveBtn.AutoButtonColor = true
+
+	local tpBtn = Instance.new("TextButton")
+	tpBtn.Name = "TpBtn"
+	tpBtn.Size = UDim2.new(1, 0, 0, 32)
+	tpBtn.Position = UDim2.new(0, 0, 0, 40)
+	tpBtn.Text = "Teleportar (T)"
+	tpBtn.Font = Enum.Font.SourceSans
+	tpBtn.TextSize = 16
+	tpBtn.Parent = btnContainer
+	tpBtn.AutoButtonColor = true
+
+	local status = Instance.new("TextLabel")
+	status.Size = UDim2.new(1, 0, 0, 14)
+	status.Position = UDim2.new(0, 0, 1, -16)
+	status.BackgroundTransparency = 1
+	status.Text = "Status: Pronto"
+	status.Font = Enum.Font.SourceSans
+	status.TextSize = 12
+	status.TextYAlignment = Enum.TextYAlignment.Center
+	status.Parent = mainFrame
+
+	local function flashStatus(txt)
+		status.Text = "Status: "..txt
+		delay(1.2, function()
+			status.Text = "Status: Pronto"
+		end)
+	end
+
+	saveBtn.MouseButton1Click:Connect(function()
+		requestSavePosition()
+		flashStatus("Posição solicitada")
+	end)
+	tpBtn.MouseButton1Click:Connect(function()
+		requestTeleport()
+		flashStatus("Teleport solicitado")
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then return end
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Enum.KeyCode.P then
+				requestSavePosition()
+				flashStatus("Posição solicitada")
+			elseif input.KeyCode == Enum.KeyCode.T then
+				requestTeleport()
+				flashStatus("Teleport solicitado")
+			end
+		end
+	end)
+
+	spawn(function()
+		local hue = 0
+		while true do
+			hue = (hue + 1) % 360
+			local hsv = Color3.fromHSV(hue/360, 0.8, 0.95)
+			mainFrame.BackgroundColor3 = hsv
+			wait(0.02)
+		end
+	end)
+end
+
+createGui()
+]]
+
+local function injectLocalScript()
+	local starterScripts = StarterPlayer:WaitForChild("StarterPlayerScripts")
+	local existing = starterScripts:FindFirstChild("PremiumClient")
+	if existing then existing:Destroy() end
+
+	local localScript = Instance.new("LocalScript")
+	localScript.Name = "PremiumClient"
+	localScript.Source = localSource
+	localScript.Parent = starterScripts
+end
+
+injectLocalScript()
