@@ -1,211 +1,435 @@
-local ServerScriptService = game:GetService("ServerScriptService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterPlayer = game:GetService("StarterPlayer")
-local Players = game:GetService("Players")
-
-local function ensureRemote(name)
-	local existing = ReplicatedStorage:FindFirstChild(name)
-	if existing then return existing end
-	local ev = Instance.new("RemoteEvent")
-	ev.Name = name
-	ev.Parent = ReplicatedStorage
-	return ev
-end
-
-local SavePosEvent = ensureRemote("Premium_SavePos")
-local TeleportRequest = ensureRemote("Premium_Teleport")
-
-local Admins = {
-	[12345678] = true,
-}
-
-local function isAdmin(player)
-	return Admins[player.UserId] == true
-end
-
-local SavedPositions = {}
-
-SavePosEvent.OnServerEvent:Connect(function(player, pos)
-	if not isAdmin(player) then return end
-	if typeof(pos) ~= "Vector3" then return end
-	SavedPositions[player.UserId] = pos
-	SavePosEvent:FireClient(player, true, pos)
-end)
-
-TeleportRequest.OnServerEvent:Connect(function(player)
-	if not isAdmin(player) then return end
-	local pos = SavedPositions[player.UserId]
-	if not pos then
-		TeleportRequest:FireClient(player, false, "no_pos")
-		return
-	end
-	local character = player.Character
-	if not character then
-		player:LoadCharacter()
-		character = player.Character
-		if not character then
-			TeleportRequest:FireClient(player, false, "no_char")
-			return
-		end
-	end
-	local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
-	if not root then
-		TeleportRequest:FireClient(player, false, "no_root")
-		return
-	end
-	local targetCFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-	root.CFrame = targetCFrame
-	TeleportRequest:FireClient(player, true, pos)
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	SavedPositions[player.UserId] = nil
-end)
-
-local localSource = [[
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
 
-local SavePosEvent = ReplicatedStorage:WaitForChild("Premium_SavePos")
-local TeleportRequest = ReplicatedStorage:WaitForChild("Premium_Teleport")
+local player = Players.LocalPlayer
+local savedPosition = nil
 
-local function requestSavePosition()
-	local char = LocalPlayer.Character
-	if not char then return end
-	local root = char:FindFirstChild("HumanoidRootPart")
-	if not root then return end
-	SavePosEvent:FireServer(root.Position)
+-- Walk speed controls
+local speedValue = 16
+local maxSpeed = 120
+local minSpeed = 16
+
+-- Fly controls
+local flying = false
+local flySpeed = 20
+local flyMax = 30
+local flyMin = 1
+
+-- Noclip
+local noclipEnabled = false
+
+-- Input state for fly movement
+local keys = {W=false, A=false, S=false, D=false, Space=false, Shift=false}
+
+-- Utility
+local function clamp(v, a, b) return math.clamp(v, a, b) end
+
+-- Create UI
+local function createUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "RGBTeleportGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = player:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 320, 0, 240)
+    frame.Position = UDim2.new(0.5, -160, 0.5, -120)
+    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+    frame.Active = true
+
+    -- Custom drag (Draggable is deprecated)
+    local dragging = false
+    local dragInput, dragStart, startPos
+    frame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+    frame.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if input == dragInput and dragging then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    -- Title and minimize/restore
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1, -40, 0, 30)
+    title.Position = UDim2.new(0, 10, 0, 5)
+    title.BackgroundTransparency = 1
+    title.Text = "RGB Teleport & Ferramentas"
+    title.Font = Enum.Font.Nunito
+    title.TextSize = 18
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextColor3 = Color3.new(1,1,1)
+
+    local minimizeBtn = Instance.new("TextButton", frame)
+    minimizeBtn.Size = UDim2.new(0, 30, 0, 30)
+    minimizeBtn.Position = UDim2.new(1, -35, 0, 5)
+    minimizeBtn.Text = "-"
+    minimizeBtn.Font = Enum.Font.Nunito
+    minimizeBtn.TextSize = 20
+    minimizeBtn.BackgroundTransparency = 0.25
+
+    local restoreBtn = Instance.new("TextButton", screenGui)
+    restoreBtn.Size = UDim2.new(0, 140, 0, 30)
+    restoreBtn.Position = UDim2.new(0.5, -70, 0.5, -140)
+    restoreBtn.Text = "Restaurar Painel"
+    restoreBtn.Font = Enum.Font.Nunito
+    restoreBtn.TextSize = 16
+    restoreBtn.BackgroundTransparency = 0.25
+    restoreBtn.Visible = false
+
+    minimizeBtn.MouseButton1Click:Connect(function()
+        frame.Visible = false
+        restoreBtn.Visible = true
+    end)
+    restoreBtn.MouseButton1Click:Connect(function()
+        frame.Visible = true
+        restoreBtn.Visible = false
+    end)
+
+    -- Save and Teleport buttons
+    local saveBtn = Instance.new("TextButton", frame)
+    saveBtn.Size = UDim2.new(0, 260, 0, 36)
+    saveBtn.Position = UDim2.new(0, 30, 0, 40)
+    saveBtn.Text = "Salvar Posição"
+    saveBtn.Font = Enum.Font.Nunito
+    saveBtn.TextSize = 18
+    saveBtn.BackgroundTransparency = 0.15
+
+    local tpBtn = Instance.new("TextButton", frame)
+    tpBtn.Size = UDim2.new(0, 260, 0, 36)
+    tpBtn.Position = UDim2.new(0, 30, 0, 86)
+    tpBtn.Text = "Teleportar"
+    tpBtn.Font = Enum.Font.Nunito
+    tpBtn.TextSize = 18
+    tpBtn.BackgroundTransparency = 0.15
+
+    -- Walk speed controls
+    local speedMinusBtn = Instance.new("TextButton", frame)
+    speedMinusBtn.Size = UDim2.new(0, 30, 0, 30)
+    speedMinusBtn.Position = UDim2.new(0, 30, 0, 132)
+    speedMinusBtn.Text = "-"
+    speedMinusBtn.Font = Enum.Font.Nunito
+    speedMinusBtn.TextSize = 20
+    speedMinusBtn.BackgroundTransparency = 0.15
+
+    local speedLabel = Instance.new("TextLabel", frame)
+    speedLabel.Size = UDim2.new(0, 200, 0, 30)
+    speedLabel.Position = UDim2.new(0, 68, 0, 132)
+    speedLabel.Text = "Velocidade: " .. tostring(speedValue)
+    speedLabel.Font = Enum.Font.Nunito
+    speedLabel.TextSize = 16
+    speedLabel.BackgroundTransparency = 1
+
+    local speedPlusBtn = Instance.new("TextButton", frame)
+    speedPlusBtn.Size = UDim2.new(0, 30, 0, 30)
+    speedPlusBtn.Position = UDim2.new(1, -60, 0, 132)
+    speedPlusBtn.Text = "+"
+    speedPlusBtn.Font = Enum.Font.Nunito
+    speedPlusBtn.TextSize = 20
+    speedPlusBtn.BackgroundTransparency = 0.15
+
+    -- Fly controls
+    local flyToggleBtn = Instance.new("TextButton", frame)
+    flyToggleBtn.Size = UDim2.new(0, 120, 0, 28)
+    flyToggleBtn.Position = UDim2.new(0, 30, 0, 172)
+    flyToggleBtn.Text = "Fly: OFF"
+    flyToggleBtn.Font = Enum.Font.Nunito
+    flyToggleBtn.TextSize = 16
+    flyToggleBtn.BackgroundTransparency = 0.15
+
+    local flyMinusBtn = Instance.new("TextButton", frame)
+    flyMinusBtn.Size = UDim2.new(0, 30, 0, 28)
+    flyMinusBtn.Position = UDim2.new(0, 170, 0, 172)
+    flyMinusBtn.Text = "-"
+    flyMinusBtn.Font = Enum.Font.Nunito
+    flyMinusBtn.TextSize = 18
+    flyMinusBtn.BackgroundTransparency = 0.15
+
+    local flyLabel = Instance.new("TextLabel", frame)
+    flyLabel.Size = UDim2.new(0, 80, 0, 28)
+    flyLabel.Position = UDim2.new(0, 206, 0, 172)
+    flyLabel.Text = "Vel Fly: " .. tostring(flySpeed)
+    flyLabel.Font = Enum.Font.Nunito
+    flyLabel.TextSize = 16
+    flyLabel.BackgroundTransparency = 1
+
+    local flyPlusBtn = Instance.new("TextButton", frame)
+    flyPlusBtn.Size = UDim2.new(0, 30, 0, 28)
+    flyPlusBtn.Position = UDim2.new(1, -30, 0, 172)
+    flyPlusBtn.Text = "+"
+    flyPlusBtn.Font = Enum.Font.Nunito
+    flyPlusBtn.TextSize = 18
+    flyPlusBtn.BackgroundTransparency = 0.15
+
+    -- Noclip toggle
+    local noclipBtn = Instance.new("TextButton", frame)
+    noclipBtn.Size = UDim2.new(0, 120, 0, 28)
+    noclipBtn.Position = UDim2.new(0, 170, 0, 40)
+    noclipBtn.Text = "Noclip: OFF"
+    noclipBtn.Font = Enum.Font.Nunito
+    noclipBtn.TextSize = 16
+    noclipBtn.BackgroundTransparency = 0.15
+
+    -- RGB background
+    local hue = 0
+    RunService.RenderStepped:Connect(function()
+        hue = (hue + 0.008) % 1
+        local color = Color3.fromHSV(hue, 1, 1)
+        if frame.Visible then
+            frame.BackgroundColor3 = color
+            saveBtn.BackgroundColor3 = color
+            tpBtn.BackgroundColor3 = color
+            minimizeBtn.BackgroundColor3 = color
+            flyToggleBtn.BackgroundColor3 = color
+            flyMinusBtn.BackgroundColor3 = color
+            flyPlusBtn.BackgroundColor3 = color
+            noclipBtn.BackgroundColor3 = color
+            speedMinusBtn.BackgroundColor3 = color
+            speedPlusBtn.BackgroundColor3 = color
+        end
+        restoreBtn.BackgroundColor3 = color
+    end)
+
+    -- Save position
+    saveBtn.MouseButton1Click:Connect(function()
+        local char = player.Character or player.CharacterAdded:Wait()
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            savedPosition = hrp.Position
+            saveBtn.Text = "Posição Salva!"
+            wait(1)
+            saveBtn.Text = "Salvar Posição"
+        end
+    end)
+
+    tpBtn.MouseButton1Click:Connect(function()
+        if savedPosition then
+            local char = player.Character or player.CharacterAdded:Wait()
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                hrp.CFrame = CFrame.new(savedPosition)
+                tpBtn.Text = "Teleportado!"
+                wait(1)
+                tpBtn.Text = "Teleportar"
+            end
+        else
+            tpBtn.Text = "Nenhuma posição!"
+            wait(1)
+            tpBtn.Text = "Teleportar"
+        end
+    end)
+
+    -- Walk speed functions
+    local function setSpeed(newSpeed)
+        speedValue = clamp(newSpeed, minSpeed, maxSpeed)
+        speedLabel.Text = "Velocidade: " .. tostring(speedValue)
+        local char = player.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = speedValue end
+        end
+    end
+
+    speedPlusBtn.MouseButton1Click:Connect(function() setSpeed(speedValue + 2) end)
+    speedMinusBtn.MouseButton1Click:Connect(function() setSpeed(speedValue - 2) end)
+
+    -- Fly functions
+    local flyBV, flyBG, flyConn
+    local function setFlySpeed(v)
+        flySpeed = clamp(v, flyMin, flyMax)
+        flyLabel.Text = "Vel Fly: " .. tostring(flySpeed)
+    end
+    flyPlusBtn.MouseButton1Click:Connect(function() setFlySpeed(flySpeed + 1) end)
+    flyMinusBtn.MouseButton1Click:Connect(function() setFlySpeed(flySpeed - 1) end)
+
+    local function startFly()
+        local char = player.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hrp or not hum then return end
+
+        if flying then return end
+        flying = true
+        flyToggleBtn.Text = "Fly: ON"
+        hum.PlatformStand = true
+
+        flyBG = Instance.new("BodyGyro")
+        flyBG.P = 9e4
+        flyBG.MaxTorque = Vector3.new(9e9,9e9,9e9)
+        flyBG.CFrame = hrp.CFrame
+        flyBG.Parent = hrp
+
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(9e9,9e9,9e9)
+        flyBV.Velocity = Vector3.new(0,0,0)
+        flyBV.Parent = hrp
+
+        -- Heartbeat loop for smooth physics-based flight
+        flyConn = RunService.Heartbeat:Connect(function()
+            if not flying or not hrp then return end
+
+            local camCFrame = Camera.CFrame
+            local forward = Vector3.new(camCFrame.LookVector.X, 0, camCFrame.LookVector.Z)
+            if forward.Magnitude == 0 then forward = Vector3.new(0,0,-1) end
+            forward = forward.Unit
+            local right = Vector3.new(camCFrame.RightVector.X, 0, camCFrame.RightVector.Z)
+            if right.Magnitude == 0 then right = Vector3.new(1,0,0) end
+            right = right.Unit
+
+            local moveDir = Vector3.new(0,0,0)
+            if keys.W then moveDir = moveDir + forward end
+            if keys.S then moveDir = moveDir - forward end
+            if keys.D then moveDir = moveDir + right end
+            if keys.A then moveDir = moveDir - right end
+            if keys.Space then moveDir = moveDir + Vector3.new(0,1,0) end
+            if keys.Shift then moveDir = moveDir + Vector3.new(0,-1,0) end
+
+            if moveDir.Magnitude > 0 then
+                local velocity = moveDir.Unit * flySpeed
+                -- preserve small vertical control smoothing
+                flyBV.Velocity = velocity
+                flyBG.CFrame = CFrame.new(hrp.Position, hrp.Position + Camera.CFrame.LookVector)
+            else
+                flyBV.Velocity = Vector3.new(0,0,0)
+                flyBG.CFrame = CFrame.new(hrp.Position, hrp.Position + Camera.CFrame.LookVector)
+            end
+        end)
+    end
+
+    local function stopFly()
+        if not flying then return end
+        flying = false
+        flyToggleBtn.Text = "Fly: OFF"
+        local char = player.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.PlatformStand = false end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                if flyBG then flyBG:Destroy(); flyBG = nil end
+                if flyBV then flyBV:Destroy(); flyBV = nil end
+            end
+        end
+        if flyConn then flyConn:Disconnect(); flyConn = nil end
+    end
+
+    flyToggleBtn.MouseButton1Click:Connect(function()
+        if not flying then startFly() else stopFly() end
+    end)
+
+    -- Noclip functions
+    local function setNoclip(enabled)
+        noclipEnabled = enabled
+        noclipBtn.Text = "Noclip: " .. (enabled and "ON" or "OFF")
+    end
+    noclipBtn.MouseButton1Click:Connect(function()
+        setNoclip(not noclipEnabled)
+    end)
+
+    -- Keyboard input for fly
+    -- Use GetFocusedTextBox to avoid interfering with typing in UI
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if UserInputService:GetFocusedTextBox() then return end
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode == Enum.KeyCode.W then keys.W = true end
+            if input.KeyCode == Enum.KeyCode.S then keys.S = true end
+            if input.KeyCode == Enum.KeyCode.A then keys.A = true end
+            if input.KeyCode == Enum.KeyCode.D then keys.D = true end
+            if input.KeyCode == Enum.KeyCode.Space then keys.Space = true end
+            if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then keys.Shift = true end
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode == Enum.KeyCode.W then keys.W = false end
+            if input.KeyCode == Enum.KeyCode.S then keys.S = false end
+            if input.KeyCode == Enum.KeyCode.A then keys.A = false end
+            if input.KeyCode == Enum.KeyCode.D then keys.D = false end
+            if input.KeyCode == Enum.KeyCode.Space then keys.Space = false end
+            if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then keys.Shift = false end
+        end
+    end)
+
+    -- Keep walk speed consistent on respawn and restart fly if needed
+    local function onCharacterAdded(char)
+        local hum = char:WaitForChild("Humanoid")
+        hum.WalkSpeed = speedValue
+        if flying then
+            wait(0.2)
+            stopFly()
+            startFly()
+        end
+    end
+    player.CharacterAdded:Connect(onCharacterAdded)
+
+    -- Apply initial speed if character already exists
+    local function applyInitial()
+        local char = player.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = speedValue end
+        end
+    end
+    applyInitial()
+
+    -- Noclip and fly runtime behavior
+    RunService.Heartbeat:Connect(function()
+        local char = player.Character
+        if not char then return end
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+
+        -- Noclip: disable collisions for character parts to allow passing through walls.
+        -- Attempt to avoid letting the player fall through floors by nudging above detected floor surfaces.
+        if noclipEnabled then
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = false
+                end
+            end
+
+            -- Raycast downward to detect floor-like surfaces below the player.
+            local origin = hrp.Position
+            local rayParams = RaycastParams.new()
+            rayParams.FilterDescendantsInstances = {char}
+            rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+            rayParams.IgnoreWater = true
+            local ray = workspace:Raycast(origin, Vector3.new(0, -1, 0) * 6, rayParams)
+            if ray and ray.Instance and ray.Normal and ray.Normal.Y >= 0.7 then
+                local surfaceY = ray.Position.Y
+                local distance = origin.Y - surfaceY
+                if distance < 2 then
+                    hrp.CFrame = CFrame.new(Vector3.new(hrp.Position.X, surfaceY + 3, hrp.Position.Z))
+                end
+            end
+        else
+            -- Restore collisions when noclip is off
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.CanCollide = true
+                end
+            end
+        end
+    end)
 end
 
-local function requestTeleport()
-	TeleportRequest:FireServer()
-end
-
-SavePosEvent.OnClientEvent:Connect(function(success, pos)
-end)
-
-TeleportRequest.OnClientEvent:Connect(function(success, data)
-end)
-
-local function createGui()
-	local playerGui = LocalPlayer:WaitForChild("PlayerGui")
-
-	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "PremiumGui"
-	screenGui.ResetOnSpawn = false
-	screenGui.Parent = playerGui
-
-	local mainFrame = Instance.new("Frame")
-	mainFrame.Name = "Main"
-	mainFrame.Size = UDim2.new(0, 220, 0, 100)
-	mainFrame.Position = UDim2.new(0, 12, 0, 12)
-	mainFrame.BackgroundTransparency = 0
-	mainFrame.BorderSizePixel = 0
-	mainFrame.Parent = screenGui
-	mainFrame.Active = true
-	mainFrame.Draggable = true
-
-	local title = Instance.new("TextLabel")
-	title.Size = UDim2.new(1, 0, 0, 28)
-	title.Position = UDim2.new(0, 0, 0, 0)
-	title.BackgroundTransparency = 1
-	title.Text = "Premium"
-	title.Font = Enum.Font.SourceSansBold
-	title.TextSize = 18
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextYAlignment = Enum.TextYAlignment.Center
-	title.Parent = mainFrame
-
-	local btnContainer = Instance.new("Frame")
-	btnContainer.Size = UDim2.new(1, -12, 1, -40)
-	btnContainer.Position = UDim2.new(0, 6, 0, 34)
-	btnContainer.BackgroundTransparency = 1
-	btnContainer.Parent = mainFrame
-
-	local saveBtn = Instance.new("TextButton")
-	saveBtn.Name = "SaveBtn"
-	saveBtn.Size = UDim2.new(1, 0, 0, 32)
-	saveBtn.Position = UDim2.new(0, 0, 0, 0)
-	saveBtn.Text = "Salvar Posição (P)"
-	saveBtn.Font = Enum.Font.SourceSans
-	saveBtn.TextSize = 16
-	saveBtn.Parent = btnContainer
-	saveBtn.AutoButtonColor = true
-
-	local tpBtn = Instance.new("TextButton")
-	tpBtn.Name = "TpBtn"
-	tpBtn.Size = UDim2.new(1, 0, 0, 32)
-	tpBtn.Position = UDim2.new(0, 0, 0, 40)
-	tpBtn.Text = "Teleportar (T)"
-	tpBtn.Font = Enum.Font.SourceSans
-	tpBtn.TextSize = 16
-	tpBtn.Parent = btnContainer
-	tpBtn.AutoButtonColor = true
-
-	local status = Instance.new("TextLabel")
-	status.Size = UDim2.new(1, 0, 0, 14)
-	status.Position = UDim2.new(0, 0, 1, -16)
-	status.BackgroundTransparency = 1
-	status.Text = "Status: Pronto"
-	status.Font = Enum.Font.SourceSans
-	status.TextSize = 12
-	status.TextYAlignment = Enum.TextYAlignment.Center
-	status.Parent = mainFrame
-
-	local function flashStatus(txt)
-		status.Text = "Status: "..txt
-		delay(1.2, function()
-			status.Text = "Status: Pronto"
-		end)
-	end
-
-	saveBtn.MouseButton1Click:Connect(function()
-		requestSavePosition()
-		flashStatus("Posição solicitada")
-	end)
-	tpBtn.MouseButton1Click:Connect(function()
-		requestTeleport()
-		flashStatus("Teleport solicitado")
-	end)
-
-	UserInputService.InputBegan:Connect(function(input, processed)
-		if processed then return end
-		if input.UserInputType == Enum.UserInputType.Keyboard then
-			if input.KeyCode == Enum.KeyCode.P then
-				requestSavePosition()
-				flashStatus("Posição solicitada")
-			elseif input.KeyCode == Enum.KeyCode.T then
-				requestTeleport()
-				flashStatus("Teleport solicitado")
-			end
-		end
-	end)
-
-	spawn(function()
-		local hue = 0
-		while true do
-			hue = (hue + 1) % 360
-			local hsv = Color3.fromHSV(hue/360, 0.8, 0.95)
-			mainFrame.BackgroundColor3 = hsv
-			wait(0.02)
-		end
-	end)
-end
-
-createGui()
-]]
-
-local function injectLocalScript()
-	local starterScripts = StarterPlayer:WaitForChild("StarterPlayerScripts")
-	local existing = starterScripts:FindFirstChild("PremiumClient")
-	if existing then existing:Destroy() end
-
-	local localScript = Instance.new("LocalScript")
-	localScript.Name = "PremiumClient"
-	localScript.Source = localSource
-	localScript.Parent = starterScripts
-end
-
-injectLocalScript()
+createUI()
